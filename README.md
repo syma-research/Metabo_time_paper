@@ -5,7 +5,7 @@
 * `data/` has the pre-processing NMR profiles for the NY cohort, as well as the processed NMR, cytokine, 
   and ROS data for the NY cohort (`.RData` files). For access of patient metadata of the NY cohort, 
   contact Siyuan Ma <siyuan.ma@vumc.org>. For access of the Spanish cohort data, contact
-  Óscar Millet <omillet@cicbiogune.es>
+  Óscar Millet <omillet@cicbiogune.es>.
 
 * `mds/` has the analyses scripts, including those used to generate manuscript display items. 
 
