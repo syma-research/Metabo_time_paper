@@ -1,3 +1,5 @@
+# A Quantitative Metabolic Signature of Host Response during SARS-CoV-2 Infection and Recovery
+
 * This repository houses the code and shareable data files from the metab-time paper (Ma et al.).
 
 * `data/` has the pre-processing NMR profiles for the NY cohort, as well as the processed NMR, cytokine, 
