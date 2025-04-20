@@ -1,0 +1,494 @@
+---
+title: "Analyze ROS and cytokine data"
+format: html
+---
+
+```{r setup}
+rm(list = ls())
+library(ggplot2)
+library(magrittr)
+dir_output <- "results/2.0_ROS_cytokine"
+dir.create(dir_output, recursive = TRUE, showWarnings = FALSE)
+```
+
+```{r correlation analysis with ROS}
+load("results/1.0_opls/predicted.RData")
+df_predicted <- df_predicted %>% 
+  dplyr::filter(cohort == "NY", covid_group != "Control") %>% 
+  dplyr::group_by(dplyr::across(patient_id:days_follow_up)) %>%
+  dplyr::summarise(`Metabo-time` = mean(`Metabo-time`, na.rm = TRUE)) %>% 
+  dplyr::ungroup()
+load("data/ROS.RData")
+
+df_matched <- df_predicted %>%
+  dplyr::inner_join(df_ROS, by = c("patient_id", "days_follow_up")) %>% 
+  dplyr::mutate(
+    days_follow_up_stand = 
+      (days_follow_up - mean(days_follow_up)) / sd(days_follow_up),
+    `Metabo-time_stand` = 
+      (`Metabo-time` - mean(`Metabo-time`)) / sd(`Metabo-time`)) 
+
+# obtain R2s of fitting ROS on metabo-time or days_follow_up
+R2_time <- summary(lm(ROS ~ days_follow_up, data = df_matched))$r.squared
+R2_metabo <- summary(lm(ROS ~ `Metabo-time`, data = df_matched))$r.squared
+# make two ggplot scatter plots of ROS vs actual time or metabo-time, 
+# with a linear fit and annotated R2 values on the top right
+p_time <- df_matched %>% 
+  ggplot(aes(x = days_follow_up, y = ROS)) +
+  geom_point() +
+  geom_smooth(method = "lm") +
+  theme_bw() +
+  annotate("text", Inf, Inf, label = paste0("R^{2}==", round(R2_time, digits = 3)), 
+           parse = TRUE,
+           hjust = 1.5, vjust = 1.5) +
+  xlab("Days since admission")
+p_metabo <- df_matched %>%
+  ggplot(aes(x = `Metabo-time`, y = ROS)) +
+  geom_point() +
+  geom_smooth(method = "lm") +
+  theme_bw() +
+  annotate("text", Inf, Inf, label = paste0("R^{2}==", round(R2_metabo, digits = 3)), 
+           parse = TRUE,
+           hjust = 1.5, vjust = 1.5)
+# save plots
+ggsave(p_time, 
+       filename = paste0(dir_output, "/ROS_time.pdf"),
+       width = 2.7, height = 2.7)
+ggsave(p_metabo, 
+       filename = paste0(dir_output, "/ROS_metabo.pdf"),
+       width = 2.7, height = 2.7)
+
+# compare metabo-time with time in a joint model
+fit_full <- 
+  lmerTest::lmer(ROS ~ days_follow_up_stand + `Metabo-time_stand` + 
+                   age + sex + bmi + (1|patient_id), data = df_matched)
+
+# generate coefficient data frame of the above regression
+tb_coef <- broom.mixed::tidy(fit_full) %>% 
+  dplyr::mutate(
+    p_label = ifelse(p.value > 0.001,
+                     round(p.value, digits = 3),
+                     formatC(p.value, format = "e", digits = 2))
+  ) %>% 
+  dplyr::select(term, estimate, p_label, std.error) %>% 
+  dplyr::rename(
+    `p-value` = p_label,
+    `ROS` = estimate
+  ) %>% 
+  # only retain terms related to days follow up and metabo-time
+  dplyr::filter(term %in% c("days_follow_up_stand", "`Metabo-time_stand`")) %>%
+  # and change term names to more formal names
+  dplyr::mutate(
+    term = ifelse(term == "days_follow_up_stand",
+                  "Days since\nadmission",
+                  "Metabo-time")
+  )
+
+# make a ggplot barplot figure of the above table, comparing the coefficient
+# for days since admission and metabo-time. Annotate the p-values on top
+# of the bars
+# add reference dashed horizontal line at y=0
+# make x axis labels black and same size as y axis title
+p_coef <- tb_coef %>% 
+  ggplot(aes(x = term)) +
+  geom_point(aes(y = ROS), stat = "identity", size = 3) +
+  geom_errorbar(aes(ymin = `ROS` - 1.96 * std.error,
+                    ymax = `ROS` + 1.96 * std.error),
+                width = 0.2) +
+  geom_text(aes(label = paste0("p=", `p-value`),
+                hjust = ifelse(ROS < 0, 1.1, -0.1),
+                y = ROS), vjust = 0.5) +
+  theme_bw() +
+  theme(axis.title.x = element_blank()) +
+  ylab("Coefficient for ROS\n(standardized)") +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  theme(axis.text.x = element_text(size = 10, color = "black"))
+# save plot
+ggsave(p_coef, 
+       filename = paste0(dir_output, "/ROS_coef.pdf"),
+       width = 2.7, height = 2.7)
+
+# use cowplot to arrange p_time, p_metabo, and p_coef into a single figure
+# in a single row, and add lables A and B to the first and third subplot
+# respectively
+p_top <- cowplot::plot_grid(p_time,
+                            p_metabo,
+                            p_coef,
+                            labels = c("A", "", "B"),
+                            nrow = 1)
+```
+
+```{r examine cytokine distribution}
+load("data/cytokine.RData")
+
+# visualize distribution
+p_boxplots <- df_cyt_ny %>% 
+  tidyr::pivot_longer(cols = -c(patient_id, days_follow_up, barcode),
+                      names_to = "cytokine",
+                      values_to = "val") %>% 
+  ggplot(aes(x = cytokine, y = val)) +
+  geom_boxplot() +
+  theme(axis.text.x = element_text(angle = 30, hjust = 1))
+ggsave(p_boxplots, 
+       filename = paste0(dir_output, "/cytokine_boxplots.pdf"),
+       width = 10, height = 4)
+
+# log-transform data
+df_cyt_ny <- df_cyt_ny %>%
+  tidyr::pivot_longer(cols = -c(patient_id, days_follow_up, barcode),
+                      names_to = "cytokine",
+                      values_to = "val") %>%
+  dplyr::group_by(cytokine) %>%
+  dplyr::filter(!all(is.na(val))) %>%
+  dplyr::mutate(
+    val = log(val)) %>%
+  dplyr::ungroup()
+
+p_boxplots <- df_cyt_ny %>%
+  ggplot(aes(x = cytokine, y = val)) +
+  geom_boxplot() +
+  # rotate x axis labels by 30 degrees
+  theme(axis.text.x = element_text(angle = 30, hjust = 1))
+ggsave(p_boxplots, 
+       filename = filename = paste0(dir_output, "/cytokine_boxplots_log.pdf"), 
+       width = 10, height = 4)
+```
+
+```{r match samples and run analysis}
+load("results/1.0_opls/predicted.RData")
+df_predicted <- df_predicted %>% 
+  dplyr::filter(cohort == "NY", covid_group != "Control") %>% 
+  dplyr::group_by(dplyr::across(patient_id:days_follow_up)) %>%
+  dplyr::summarise(`Metabo-time` = mean(`Metabo-time`, na.rm = TRUE)) %>% 
+  dplyr::ungroup()
+
+df_matched <- df_cyt_ny %>% 
+  dplyr::inner_join(df_predicted) %>% 
+  dplyr::filter(!is.na(val)) %>% 
+  dplyr::group_by(cytokine) %>% 
+  dplyr::filter(length(unique(patient_id)) >= 5) %>% 
+  dplyr::ungroup() 
+
+df_test <- 
+  df_matched %>% 
+  dplyr::group_split(cytokine) %>% 
+  purrr::map_dfr(function(i_tb) {
+    if(length(unique(i_tb$patient_id)) == nrow(i_tb)) {
+      i_fit_class <- "lm"
+      i_fitted <- list(lm(val ~ `Metabo-time` + 
+                            age + sex + bmi, 
+                          data = i_tb))
+    }
+    else {
+      i_fit_class <- "lme"
+      i_fitted <- list(
+        lmerTest::lmer(val ~ `Metabo-time` + 
+                         age + sex + bmi +
+                         (1 | patient_id),
+                       data = i_tb))
+    }
+    tibble::tibble(
+      cytokine = i_tb$cytokine[1],
+      fitted = i_fitted, 
+      fit_class = i_fit_class,
+      label = "Metabo-time"
+    )
+  })
+
+df_test_time <- 
+  df_matched %>% 
+  dplyr::group_split(cytokine) %>% 
+  purrr::map_dfr(function(i_tb) {
+    i_tb <- i_tb
+    if(length(unique(i_tb$patient_id)) == nrow(i_tb)) {
+      i_fit_class <- "lm"
+      i_fitted <- list(lm(val ~ days_follow_up +
+                            age + sex + bmi, data = i_tb))
+    }
+    else {
+      i_fit_class <- "lme"
+      i_fitted <- list(lmerTest::lmer(
+        val ~ days_follow_up + 
+          age + sex + bmi + (1 | patient_id),
+        data = i_tb))
+    }
+    tibble::tibble(
+      cytokine = i_tb$cytokine[1],
+      fitted = i_fitted, 
+      fit_class = i_fit_class,
+      label = "Actual time"
+    )
+  })
+
+df_results <- 
+  rbind(df_test, df_test_time) %>%
+  dplyr::group_split(cytokine, label) %>% 
+  purrr::map_dfr(function(i_tb) {
+    coef_table <- summary(i_tb$fitted[[1]])$coef 
+    tibble::tibble(
+      variable = rownames(coef_table)[-1],
+      estimate = coef_table[-1, 1],
+      se = coef_table[-1, 2],
+      p = {
+        if(i_tb$fit_class == "lme")
+          coef_table[-1, 5]
+        else
+          coef_table[-1, 4]
+      }) %>% 
+      tidyr::expand_grid(i_tb)
+  }) %>% 
+  dplyr::group_by(label, variable) %>% 
+  dplyr::mutate(q = p.adjust(p, method = "BH")) %>% 
+  dplyr::arrange(p) %>% 
+  dplyr::mutate(p_theoretical = seq(1, dplyr::n()) / dplyr::n()) %>% 
+  dplyr::ungroup() %>% 
+  dplyr::mutate(cytokine_name = 
+                  cytokine %>% 
+                  stringr::str_to_upper() %>% 
+                  stringr::str_replace_all(stringr::fixed("_"), "-"))
+
+q_comp <- 
+  df_results %>% 
+  dplyr::ungroup() %>% 
+  dplyr::filter(variable %in% c("`Metabo-time`", "days_follow_up")) %>% 
+  dplyr::select(cytokine_name, q, label) %>% 
+  tidyr::pivot_wider(values_from = q,
+                     names_from = label)
+p_comp_q <- q_comp %>% 
+  ggplot(aes(x = -log10(`Metabo-time`),
+             y = -log10(`Actual time`))) +
+  geom_point() +
+  geom_hline(yintercept = -log10(0.25), linetype = "dashed") +
+  geom_vline(xintercept = -log10(0.25), linetype = "dashed") +
+  ggrepel::geom_label_repel(aes(label = ifelse(`Metabo-time` < 0.25 | `Actual time` < 0.25, cytokine_name, NA))) +
+  theme_bw() +
+  xlab("q-value from metabo-time") +
+  ylab("q-value from actual time")
+ggsave(p_comp_q, 
+       filename = 
+         paste0(dir_output, "/cytokine_q_comp.pdf"),
+       width = 3.5, height = 3.5)
+
+cytokines_candidate <- df_results %>% 
+  dplyr::arrange(q) %>% 
+  dplyr::filter(label == "Metabo-time",
+                variable == "`Metabo-time`",
+                q  < 0.25) %>% 
+  {.$cytokine_name}
+df_data <- df_matched %>% 
+  dplyr::mutate(cytokine_name = 
+                  cytokine %>% 
+                  stringr::str_to_upper() %>% 
+                  stringr::str_replace_all(stringr::fixed("_"), "-")) %>% 
+  dplyr::filter(cytokine_name %in% cytokines_candidate) %>% 
+  dplyr::mutate(cytokine_name = factor(cytokine_name, levels = cytokines_candidate))
+df_labels_q <- df_results %>% 
+  dplyr::filter(variable == "`Metabo-time`", cytokine_name %in% cytokines_candidate) %>% 
+  dplyr::mutate(label = paste0("Adjusted q = ", round(q, digits = 3))) %>% 
+  dplyr::mutate(cytokine_name = factor(cytokine_name, levels = cytokines_candidate))
+p_cytokines <- df_data %>% 
+  ggplot(aes(x = `Metabo-time`, 
+             y = val)) +
+  geom_point() +
+  geom_smooth(method = "lm") +
+  geom_text(data = df_labels_q, 
+            aes(label = label),
+            x = -Inf, y = -Inf,
+            hjust = -0.1, vjust = -2) +
+  theme_bw() +
+  xlab("Metabo-time") +
+  ylab("Cytokine expression") +
+  facet_wrap(~cytokine_name, nrow = 1, scales = "free_y") 
+ggsave(p_cytokines, 
+       filename = paste0(dir_output, "/cytokine_q.pdf"),
+       width = 10, height = 3.5)
+p_bottom <- cowplot::plot_grid(
+  p_comp_q, p_cytokines,
+  nrow = 1,
+  labels = c("C", "D"),
+  rel_widths = c(1, 3)
+)
+p_fig3 <- cowplot::plot_grid(
+  p_top, p_bottom,
+  ncol = 1
+)
+ggsave(p_fig3, 
+       filename = "results/figures/figure3/fig3.pdf",
+       width = 10, height = 6)
+
+tb_write_cytokines <- df_results %>% 
+  dplyr::arrange(q) %>% 
+  dplyr::filter(variable %in% c("`Metabo-time`", "days_follow_up"),
+                q  < 0.25) %>% 
+  dplyr::transmute(
+    `Variable associated with cytokine` =
+      variable %>% 
+      dplyr::recode_factor(
+        "`Metabo-time`" = "Metabo-time",
+        "days_follow_up" = "Days since admission"
+      ),
+    Cytokine = cytokine_name,
+    `Estimated effect` = estimate,
+    `Standard error` = se,
+    `Raw p-value` = p,
+    `q-value` = q
+  ) %>% 
+  dplyr::arrange(`Variable associated with cytokine`,
+                 `q-value`)
+# save as supplemental table
+tb_write_cytokines %>% 
+  readr::write_csv("results/supplementals/suppTable2.csv")
+```
+
+```{r analyze individual cytokines}
+load("results/1.0_opls/predicted.RData")
+df_predicted <- df_predicted %>% 
+  dplyr::filter(cohort == "NY", covid_group != "Control") %>% 
+  dplyr::select(patient_id:days_follow_up, `2-Aminobutyric acid`:V5TG) %>% 
+  tidyr::pivot_longer(cols = `2-Aminobutyric acid`:V5TG,
+                      names_to = "metabolite",
+                      values_to = "val_metab") %>%
+  dplyr::group_by(across(patient_id:days_follow_up), metabolite) %>% 
+  dplyr::summarise(val_metab = mean(val_metab, na.rm = TRUE)) %>% 
+  dplyr::ungroup()
+
+df_matched <- df_cyt_ny %>% 
+  dplyr::inner_join(df_predicted, relationship = "many-to-many") %>% 
+  dplyr::filter(!is.na(val)) %>% 
+  dplyr::group_by(cytokine, metabolite) %>% 
+  dplyr::filter(length(unique(patient_id)) >= 5) %>% 
+  dplyr::ungroup()
+
+# parallel computation with future
+future::plan(future::multisession)
+set.seed(0)
+df_test <- 
+  df_matched %>% 
+  dplyr::group_split(cytokine, metabolite) %>% 
+  # parallel calculation for each cytokine-metabolite pair
+  future.apply::future_lapply(
+    function(i_tb) {
+      if(length(unique(i_tb$patient_id)) == nrow(i_tb)) {
+        i_fit_class <- "lm"
+        i_fitted <- list(lm(val ~ val_metab + 
+                              age + sex + bmi, 
+                            data = i_tb))
+      }
+      else {
+        i_fit_class <- "lme"
+        i_fitted <- list(
+          lmerTest::lmer(val ~ val_metab + 
+                           age + sex + bmi +
+                           (1 | patient_id),
+                         data = i_tb))
+      }
+      tibble::tibble(
+        cytokine = i_tb$cytokine[1],
+        metabolite = i_tb$metabolite[1],
+        fitted = i_fitted, 
+        fit_class = i_fit_class,
+        label = "Metabo-time")
+    }, 
+    future.seed = TRUE) %>%
+  purrr::reduce(rbind)
+save(df_test, 
+     file = paste0(dir_output, "/individual_cytokine.RData"))
+
+# extract lme coefficients from df_test
+df_results <- 
+  df_test %>%
+  dplyr::group_split(cytokine, metabolite) %>% 
+  purrr::map_dfr(function(i_tb) {
+    coef_table <- summary(i_tb$fitted[[1]])$coef 
+    tibble::tibble(
+      variable = rownames(coef_table)[-1],
+      estimate = coef_table[-1, 1],
+      se = coef_table[-1, 2],
+      p = {
+        if(i_tb$fit_class == "lme")
+          coef_table[-1, 5]
+        else
+          coef_table[-1, 4]
+      }) %>% 
+      tidyr::expand_grid(i_tb) %>% 
+      dplyr::select(-fitted)
+  }) %>% 
+  dplyr::group_by(variable, metabolite) %>% 
+  dplyr::mutate(q = p.adjust(p, method = "BH")) %>% 
+  dplyr::arrange(p) %>% 
+  dplyr::mutate(p_theoretical = seq(1, dplyr::n()) / dplyr::n()) %>% 
+  dplyr::ungroup() %>% 
+  dplyr::mutate(cytokine_name = 
+                  cytokine %>% 
+                  stringr::str_to_upper() %>% 
+                  stringr::str_replace(stringr::fixed("_"), "-"))
+save(df_results, 
+     file = paste0(dir_output, "/individual_cytokine_results.RData"))
+
+# plot significant q-value individual cytokine-metabolite pairs in df_results
+# into a ggplot heatmap with cytokines as columns and metabolites as rows
+df_plot <- df_results %>% 
+  dplyr::filter(variable == "val_metab") %>% 
+  dplyr::group_by(cytokine_name) %>%
+  dplyr::filter(any(q < 0.05)) %>% 
+  dplyr::group_by(metabolite) %>%
+  dplyr::filter(any(q < 0.05)) %>% 
+  dplyr::ungroup() %>% 
+  dplyr::mutate(fill = -log10(q) * sign(estimate))
+mat_toculster <- df_plot %>% 
+  dplyr::select(fill, cytokine, metabolite) %>%
+  tidyr::pivot_wider(names_from = cytokine,
+                     values_from = fill) %>% 
+  as.data.frame() %>% 
+  tibble::column_to_rownames("metabolite") %>% 
+  as.matrix()
+# hierarchical clustering of rows and columns
+hclust_rows <- hclust(dist(mat_toculster))
+ordered_metabolites <- rownames(mat_toculster)[hclust_rows$order]
+hclust_cols <- hclust(dist(t(mat_toculster)))
+ordered_cytokines <- colnames(mat_toculster)[hclust_cols$order]
+
+source("R/lipid_names.R")
+p_heatmap <- df_plot %>% 
+  dplyr::mutate(cytokine = factor(cytokine, levels = ordered_cytokines),
+                metabolite = factor(metabolite, levels = ordered_metabolites)) %>%
+  dplyr::arrange(cytokine) %>% 
+  dplyr::mutate(cytokine_name = cytokine_name %>% 
+                  forcats::as_factor()) %>%
+  dplyr::arrange(metabolite) %>% 
+  dplyr::left_join(df_lipid_mapping, by = c("metabolite" = "Key")) %>%
+  dplyr::mutate(metabolite_name = 
+                  ifelse(is.na(variable_print), metabolite, variable_print) %>% 
+                  forcats::as_factor()) %>% 
+  dplyr::mutate(qval_text = dplyr::case_when(
+    q < 0.001 ~ "***",
+    q < 0.01 ~ "**",
+    q < 0.05 ~ "*",
+    TRUE ~ ""
+  )) %>% 
+  ggplot(aes(x = cytokine_name, y = metabolite_name, fill = fill)) +
+  geom_tile() +
+  # add q value indicator texts
+  geom_text(aes(label = qval_text, y = as.numeric(metabolite_name) - 0.5), 
+            hjust = 0.5, vjust = 0.5) +
+  # add q-value legend
+  annotate(geom = "text", x = 1, y = -4,
+           label = "* q < 0.05\n** q < 0.01\n*** q < 0.001",
+           hjust = 0, 
+           vjust = 1) +
+  coord_cartesian(clip = "off", 
+                  xlim = c(1, ncol(mat_toculster)),
+                  ylim = c(1, nrow(mat_toculster))) +
+  scale_fill_gradient2(low = "blue", mid = "white", high = "red",
+                       midpoint = 0,
+                       name = "-log10(q-value)*sign(coef)") +
+  theme_bw() +
+  xlab("Cytokine") +
+  ylab("Metabolite") +
+  # rotate x axis label
+  theme(axis.text.x = element_text(angle = 30, hjust = 1)) +
+  theme(axis.title = element_blank(),
+        legend.position = "bottom")
+ggsave("results/supplementals/suppFig2.pdf",
+       p_heatmap, width = 7, height = 7)
+```

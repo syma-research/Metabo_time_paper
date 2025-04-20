@@ -1,0 +1,101 @@
+Key,Parameter,Main_sub,Fraction
+HDA1,Apo-A1,Main,HDL
+H1A1,Apo-A1,Sub,HDL
+H2A1,Apo-A1,Sub,HDL
+H3A1,Apo-A1,Sub,HDL
+H4A1,Apo-A1,Sub,HDL
+HDA2,Apo-A2,Main,HDL
+H1A2,Apo-A2,Sub,HDL
+H2A2,Apo-A2,Sub,HDL
+H3A2,Apo-A2,Sub,HDL
+H4A2,Apo-A2,Sub,HDL
+TPAB,Apo-B100,,
+LDAB,Apo-B,Main,LDL
+L1AB,Apo-B,Sub,LDL
+L2AB,Apo-B,Sub,LDL
+L3AB,Apo-B,Sub,LDL
+L4AB,Apo-B,Sub,LDL
+L5AB,Apo-B,Sub,LDL
+L6AB,Apo-B,Sub,LDL
+IDAB,Apo-B,Main,IDL
+VLAB,Apo-B,Main,VLDL
+HDPL,Phospholipids,Main,HDL
+H1PL,Phospholipids,Sub,HDL
+H2PL,Phospholipids,Sub,HDL
+H3PL,Phospholipids,Sub,HDL
+H4PL,Phospholipids,Sub,HDL
+LDPL,Phospholipids,Main,LDL
+L1PL,Phospholipids,Sub,LDL
+L2PL,Phospholipids,Sub,LDL
+L3PL,Phospholipids,Sub,LDL
+L4PL,Phospholipids,Sub,LDL
+L5PL,Phospholipids,Sub,LDL
+L6PL,Phospholipids,Sub,LDL
+IDPL,Phospholipids,Main,IDL
+VLPL,Phospholipids,Main,VLDL
+V1PL,Phospholipids,Sub,VLDL
+V2PL,Phospholipids,Sub,VLDL
+V3PL,Phospholipids,Sub,VLDL
+V4PL,Phospholipids,Sub,VLDL
+V5PL,Phospholipids,Sub,VLDL
+ABA1,Apo-B100/Apo-A1,,
+LDHD,LDL-Cholesterol/HDL-Cholesterol,,
+TPCH,Cholesterol,,
+HDCH,Cholesterol,Main,HDL
+H1CH,Cholesterol,Sub,HDL
+H2CH,Cholesterol,Sub,HDL
+H3CH,Cholesterol,Sub,HDL
+H4CH,Cholesterol,Sub,HDL
+LDCH,Cholesterol,Main,LDL
+L1CH,Cholesterol,Sub,LDL
+L2CH,Cholesterol,Sub,LDL
+L3CH,Cholesterol,Sub,LDL
+L4CH,Cholesterol,Sub,LDL
+L5CH,Cholesterol,Sub,LDL
+L6CH,Cholesterol,Sub,LDL
+IDCH,Cholesterol,Main,IDL
+VLCH,Cholesterol,Main,VLDL
+V1CH,Cholesterol,Sub,VLDL
+V2CH,Cholesterol,Sub,VLDL
+V3CH,Cholesterol,Sub,VLDL
+V4CH,Cholesterol,Sub,VLDL
+V5CH,Cholesterol,Sub,VLDL
+HDFC,Free Cholesterol,Main,HDL
+H1FC,Free Cholesterol,Sub,HDL
+H2FC,Free Cholesterol,Sub,HDL
+H3FC,Free Cholesterol,Sub,HDL
+H4FC,Free Cholesterol,Sub,HDL
+LDFC,Free Cholesterol,Main,LDL
+L1FC,Free Cholesterol,Sub,LDL
+L2FC,Free Cholesterol,Sub,LDL
+L3FC,Free Cholesterol,Sub,LDL
+L4FC,Free Cholesterol,Sub,LDL
+L5FC,Free Cholesterol,Sub,LDL
+L6FC,Free Cholesterol,Sub,LDL
+IDFC,Free Cholesterol,Main,IDL
+VLFC,Free Cholesterol,Main,VLDL
+V1FC,Free Cholesterol,Sub,VLDL
+V2FC,Free Cholesterol,Sub,VLDL
+V3FC,Free Cholesterol,Sub,VLDL
+V4FC,Free Cholesterol,Sub,VLDL
+V5FC,Free Cholesterol,Sub,VLDL
+TPTG,Triglycerides,,
+HDTG,Triglycerides,Main,HDL
+H1TG,Triglycerides,Sub,HDL
+H2TG,Triglycerides,Sub,HDL
+H3TG,Triglycerides,Sub,HDL
+H4TG,Triglycerides,Sub,HDL
+LDTG,Triglycerides,Main,LDL
+L1TG,Triglycerides,Sub,LDL
+L2TG,Triglycerides,Sub,LDL
+L3TG,Triglycerides,Sub,LDL
+L4TG,Triglycerides,Sub,LDL
+L5TG,Triglycerides,Sub,LDL
+L6TG,Triglycerides,Sub,LDL
+IDTG,Triglycerides,Main,IDL
+VLTG,Triglycerides,Main,VLDL
+V1TG,Triglycerides,Sub,VLDL
+V2TG,Triglycerides,Sub,VLDL
+V3TG,Triglycerides,Sub,VLDL
+V4TG,Triglycerides,Sub,VLDL
+V5TG,Triglycerides,Sub,VLDL

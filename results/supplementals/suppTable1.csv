@@ -1,0 +1,11 @@
+Variable,Estiamted effect,Standard error,P-value,Notes
+Severe infection vs. mild,-1.3539476011968818,0.32346113542922245,5.958566009942927e-5,Definition of severe infection in Methods.
+Age,-0.010628510029215762,0.012462717920656457,0.39571649768284844,
+Sex (male vs. female),-0.34339446616726,0.30538799261110494,0.2634094845866381,
+BMI,-0.0461888335884798,0.05473617312144483,0.4056633748347126,Only NY COVID-19 cohort had BMI information; analysis for BMI performed within NY.
+Cohort (SP vs. NY),-0.49103232570383687,0.34688551649498417,0.15989622465201614,
+COVID-19 vaccine (vaccinated vs. non-vaccinated),-0.013565510000247426,1.1632068400751596,0.990717491833697,NY cohort was before COVID-19 vaccines were available; only two subjects from SP were vaccinated.
+Diabetes (yes vs. no),0.055687345839399514,0.5331308962384921,0.9170107088435782,
+Hypertension (yes vs. no),-0.4176231235603726,0.3854120822081716,0.28105875998545804,
+Inter-subject random intercept,NA,NA,0.054188127494185646,Based on likelihood ratio test on subject-level random effects in linear mixed effects modeling. See Methods for details.
+Inter-subject random slope,NA,NA,0.00812245123821002,Based on likelihood ratio test on subject-level random effects in linear mixed effects modeling. See Methods for details.

@@ -1,0 +1,966 @@
+---
+title: "Host transcriptome"
+format: html
+---
+
+```{r setup}
+rm(list = ls())
+library(ggplot2)
+library(magrittr)
+dir_output <- "results/3.0_TX"
+dir.create(dir_output, recursive = TRUE, showWarnings = FALSE)
+```
+
+```{r load data}
+#### match samples and run analysis
+load("results/1.0_opls/predicted.RData")
+df_predicted <- df_predicted %>% 
+  dplyr::filter(cohort == "NY", covid_group != "Control") %>% 
+  dplyr::group_by(dplyr::across(patient_id:days_follow_up)) %>%
+  dplyr::summarise(`Metabo-time` = mean(`Metabo-time`, na.rm = TRUE)) %>% 
+  dplyr::ungroup()
+load("data/tx_meta.RData")
+df_matched <- df_predicted %>% 
+  dplyr::inner_join(df_meta_tx, by = c("patient_id", "days_follow_up"))
+# sanity check that there shouldn't be duplicate rnaseq samples in
+# df_matched
+if(anyDuplicated(df_matched$sampleID))
+  stop("There are duplicate RNASeq samples in df_matched")
+```
+
+```{r DESeq for Metabotime}
+mat_tx <- readr::read_csv("data/COVID-19_DESeq/COVID-19_DESeq2RawCounts_Ctrl_Mild_Severe.csv") %>% 
+  as.data.frame() %>% 
+  tibble::column_to_rownames("geneid") %>% 
+  as.matrix() %>% 
+  {.[, df_matched$sampleID]}
+# filter for prevalence
+mat_tx <- mat_tx[apply(mat_tx > 0, 1, sum) >= 10, ]
+
+# run deseq2
+# standardize continuous variables for DESeq2
+df_matched <- df_matched %>% 
+  dplyr::mutate(Metabotime = `Metabo-time`, 
+                age_mod = (age - mean(age)) / sd(age), 
+                bmi_mod = (bmi - mean(bmi)) / sd(bmi)) %>% 
+  as.data.frame()
+rownames(df_matched) <- df_matched$sampleID
+dds <- DESeq2::DESeqDataSetFromMatrix(countData = mat_tx,
+                                      colData = df_matched,
+                                      design = ~ Metabotime + age_mod +
+                                        sex + bmi_mod)
+dds <- DESeq2::DESeq(dds)
+save(dds, file = paste0(dir_output, "/fit_deseq.RData"))
+
+gene_anno <- readr::read_tsv("data/COVID-19_DESeq/mart_export.txt") %>% 
+  as.data.frame() %>% 
+  dplyr::filter(!duplicated(`Gene description`))
+
+tb_res <- DESeq2::results(dds, name = "Metabotime") %>% 
+  as.data.frame() %>% 
+  tibble::rownames_to_column("id") %>%
+  dplyr::filter(!is.na(pvalue),
+                id %in% gene_anno$`Gene stable ID`) %>% 
+  dplyr::mutate(q = p.adjust(pvalue, method = "BH")) %>% 
+  dplyr::left_join(gene_anno, by = c("id" = "Gene stable ID"))
+
+# write supplemental table
+tb_res %>% 
+  dplyr::filter(q < 0.25) %>% 
+  dplyr::arrange(pvalue) %>% 
+  dplyr::transmute(`Ensembl ID` = id,
+                   `Gene name` = `Gene name`,
+                   `log2 FC` = log2FoldChange,
+                   `p-value` = pvalue,
+                   `q-value` = q) %>%
+  readr::write_csv("results/supplementals/suppTable3.csv")
+
+p_DE <- tb_res %>% 
+  ggplot(aes(x = log2FoldChange, y = -log10(pvalue))) +
+  geom_point(aes(color = q < 0.25), size = 0.3, alpha = 0.5) +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed") +
+  scale_color_manual(values = c("TRUE" = "red", "FALSE" = "black"), 
+                     labels = c("q > 0.25", "q < 0.25")) +
+  geom_vline(xintercept = 0, linetype = "dashed") +
+  annotate(geom = "text", x = -Inf, y = -log10(0.05),
+           label = "Nominal\np = 0.05",
+           hjust = -0.1, vjust = 0.5) +
+  theme_bw() +
+  theme(legend.position = c(1, 1),
+        legend.justification = c(1, 1),
+        legend.background = element_blank(),
+        legend.title = element_blank()) +
+  xlab("Adjusted log2 FC (metabo-time)") +
+  ylab("-log10(nominal p-value)") 
+ggsave(p_DE, filename = paste0(dir_output, "/volcano.pdf"),
+       width = 3, height = 3)
+```
+
+```{r}
+df_pathways <- tibble::tibble(
+  geneset_name = c("Hallmark", "KEGG", "GO", "Cell type"),
+  category = c("H", "C2", "C5", "C8"),
+  subcategory = c(NA, "CP:KEGG", NA, NA)
+)
+
+ll_pathways <- df_pathways %>% 
+  dplyr::group_split(geneset_name) %>% 
+  purrr::map(function(i_tb) {
+    if(is.na(i_tb$subcategory))
+      gset <- msigdbr::msigdbr(species = "human", 
+                               category = i_tb$category)
+    else
+      gset <- msigdbr::msigdbr(species = "human", 
+                               category = i_tb$category, 
+                               subcategory = i_tb$subcategory)
+    gset_anno <- gset %>% 
+      dplyr::group_by(gs_name) %>% 
+      dplyr::summarise(description = gs_description[1])
+    gset_list <- split(gset$ensembl_gene, gset$gs_name)
+    l_return <- list(list(gset, gset_anno, gset_list))
+    names(l_return) <- i_tb$geneset_name
+    return(l_return)
+  }) %>% 
+  purrr::reduce(c)
+
+tb_res <- tb_res %>% 
+  dplyr::mutate(`Novel transcript` = `Gene description` %>% 
+                  stringr::str_detect("novel transcript"))
+for(i_gs in names(ll_pathways)) {
+  gset_list <- ll_pathways[[i_gs]][[3]]
+  tb_res <- tb_res %>% 
+    dplyr::mutate(!!sym(i_gs) := 
+                    id %in% unlist(gset_list))
+}
+
+# number of annotations per group
+tb_summary <- tb_res %>% 
+  dplyr::filter(pvalue < 0.05) %>% 
+  dplyr::group_by(log2FoldChange > 0) %>% 
+  dplyr::mutate(`Total genes` = dplyr::n())%>% 
+  dplyr::group_by(log2FoldChange > 0, `Total genes`) %>%
+  # summarise number of genes with each type of annotation
+  dplyr::summarise_at(vars(`Novel transcript`:KEGG), 
+                      function(i_col) sum(i_col)) %>%
+  dplyr::ungroup() 
+
+colors <-rev( palette.colors(n = 3, palette = "R4")[-1])
+names(colors) <- c("Novel transcripts", "MSigDB Hallmark")
+p_prop <- tb_summary %>% 
+  dplyr::arrange(`log2FoldChange > 0`) %>%
+  dplyr::mutate(Group = ifelse(`log2FoldChange > 0`, 
+                               "Higher metabo-time\n(mild infection)", 
+                               "Lower metabo-time\n(severe infection)") %>% 
+                  forcats::as_factor()) %>% 
+  dplyr::select(Group, `Total genes`, `Novel transcript`:KEGG) %>%
+  tidyr::pivot_longer(`Novel transcript`:KEGG, 
+                      names_to = "Class", 
+                      values_to = "count") %>%
+  dplyr::group_by(Group, Class) %>% 
+  dplyr::mutate(perc = count / sum(`Total genes`),
+                perc_se = sqrt(perc * (1 - perc) / `Total genes`)) %>%
+  dplyr::filter(Class %in% c("Novel transcript", "Hallmark")) %>% 
+  dplyr::mutate(Class = Class %>% 
+                  dplyr::recode_factor("Novel transcript" = "Novel transcripts",
+                                       "Hallmark" = "MSigDB Hallmark")) %>%
+  dplyr::arrange(Group) %>% 
+  dplyr::mutate(xlab = paste0(Group, "\n", `Total genes`, " genes") %>% 
+                  forcats::as_factor()) %>%
+  ggplot(aes(x = xlab, fill = Class, y = perc)) +
+  geom_bar(stat = "identity", position = position_dodge()) +
+  geom_errorbar(aes(ymax = perc + perc_se, ymin = perc - perc_se), 
+                position = position_dodge(width = 0.875),
+                width = 0.25) +
+  scale_fill_manual(values = colors) +
+  theme_bw() +
+  theme(legend.position = c(0, 1),
+        legend.justification = c(0, 1),
+        legend.background = element_blank(),
+        legend.title = element_blank()) +
+  xlab("Transcripts associated with metabo-time") +
+  ylab("Proportion of\ngene annotations")
+ggsave(p_prop, filename = paste0(dir_output, "/proportion.pdf"),
+       width = 3.5, height = 3)
+```
+
+```{r gsea}
+# GSEA
+gene_dict <- tb_res$`Gene name`
+names(gene_dict) <- tb_res$id
+
+gene_stats <- tb_res$stat
+names(gene_stats) <- tb_res$id
+
+set.seed(0)
+tb_gsea <- ll_pathways %>% 
+  purrr::imap_dfr(function(i_pathway, i_gs){
+    fit_gsea <- fgsea::fgseaSimple(i_pathway[[3]], gene_stats, 
+                                   minSize = 15, maxSize = 400, nproc = 16,
+                                   nperm = 100000)
+    gset_anno <- i_pathway[[2]]
+    fit_gsea <- fit_gsea %>% 
+      dplyr::left_join(gset_anno, by = c("pathway" = "gs_name")) %>% 
+      dplyr::mutate(gene_rep = 
+                      leadingEdge %>% 
+                      purrr::map_chr(function(i_genes)
+                        gene_dict[i_genes][seq(1, 3)] %>% 
+                          paste0(collapse = ";") %>% 
+                          paste0(";...")
+                      )) %>% 
+      dplyr::arrange(pval) %>% 
+      dplyr::mutate(gs_name = i_gs)
+    return(fit_gsea)
+  })
+
+tb_gsea %>% 
+  dplyr::group_by(gs_name) %>%
+  dplyr::mutate(padj = p.adjust(pval, method = "bonf")) %>% 
+  dplyr::filter(padj < 0.05) %>% 
+  dplyr::filter(gs_name %in% c("Hallmark", "KEGG")) %>% 
+  dplyr::group_by(gs_name) %>%
+  dplyr::arrange(pval) %>%
+  dplyr::mutate(pathway = pathway %>% 
+                  forcats::as_factor()) %>% 
+  ggplot(aes(y = pathway, x = ES)) +
+  geom_bar(stat = "identity") +
+  facet_grid(gs_name ~ ., scales = "free_y") +
+  theme_bw()
+
+i_gs <- "Hallmark"
+fit_gsea <- fgsea::fgseaSimple(ll_pathways[[i_gs]][[3]], gene_stats, 
+                               minSize = 15, maxSize = 400, nproc = 16,
+                               nperm = 100000)
+gset_anno <- ll_pathways[[i_gs]][[2]]
+fit_gsea <- fit_gsea %>% 
+  dplyr::left_join(gset_anno, by = c("pathway" = "gs_name")) %>% 
+  dplyr::mutate(gene_rep = 
+                  leadingEdge %>% 
+                  purrr::map_chr(function(i_genes)
+                    gene_dict[i_genes][seq(1, 3)] %>% 
+                      paste0(collapse = ";") %>% 
+                      paste0(";...")
+                  )) %>% 
+  dplyr::arrange(pval) 
+
+gset_hm <- msigdbr::msigdbr(species = "human", category = "H")
+gset_hm_anno <- gset_hm %>% 
+  dplyr::group_by(gs_name) %>% 
+  dplyr::summarise(description = gs_description[1])
+gset_list_hm <- split(gset_hm$ensembl_gene, gset_hm$gs_name)
+
+gene_stats <- tb_res$stat
+names(gene_stats) <- tb_res$id
+gene_stats <- gene_stats[!is.na(gene_stats)]
+fit_gsea_hm <- fgsea::fgseaSimple(gset_list_hm, gene_stats, 
+                                  minSize = 15, maxSize = 400,
+                                  nperm = 100000)
+fit_gsea_hm <- fit_gsea_hm %>% 
+  dplyr::left_join(gset_hm_anno, by = c("pathway" = "gs_name")) %>% 
+  dplyr::mutate(gene_rep = 
+                  leadingEdge %>% 
+                  purrr::map_chr(function(i_genes)
+                    gene_dict[i_genes][seq(1, 3)] %>% 
+                      paste0(collapse = ";") %>% 
+                      paste0(";...")
+                    )) %>% 
+  dplyr::arrange(pval) 
+save(fit_gsea_hm, file = "results/3.0_tx/gsea_hm.RData")
+# fit_gsea_hm_collapse <- 
+#   fit_gsea_hm %>% 
+#   dplyr::filter(padj < 0.05) %>% 
+#   fgsea::collapsePathways(pathways = gset_list_hm,
+#                           stats = gene_stats)
+fit_gsea_hm %>% 
+  dplyr::transmute(Pathway = pathway,
+                   q = padj,
+                   `E Score` = ES,
+                   Description = description,
+                   `Rep. genes` = gene_rep) %>% 
+  readr::write_csv("results/3.0_tx/gsea_hm.csv")
+
+# fit_gsea_hm_collapse <- 
+#   fit_gsea_hm %>% 
+#   dplyr::filter(padj < 0.05) %>% 
+#   fgsea::collapsePathways(pathways = gset_list_hm,
+#                           stats = gene_stats)
+fit_gsea_hm %>% 
+  dplyr::transmute(Pathway = pathway,
+                   q = padj,
+                   `E Score` = ES,
+                   Description = description,
+                   `Rep. genes` = gene_rep) %>% 
+  readr::write_csv("results/3.0_tx/gsea_hm.csv")
+```
+
+```{r correlation with severity}
+df_matched$severity_mod <- factor(df_matched$severity, levels = c("severe", "mild"))
+dds <- DESeq2::DESeqDataSetFromMatrix(countData = mat_tx,
+                                      colData = df_matched,
+                                      design = ~ severity_mod + age_mod +
+                                        sex + bmi_mod)
+dds <- DESeq2::DESeq(dds)
+save(dds, file = "results/3.0_tx/DE_severity.RData")
+tb_res_severity <- DESeq2::results(dds, contrast = c("severity_mod", "mild", "severe")) %>% 
+  as.data.frame() %>% 
+  tibble::rownames_to_column("id") %>% 
+  dplyr::filter(!is.na(pvalue)) %>% 
+  dplyr::arrange(pvalue)
+```
+
+```{r plot GSEA}
+fit_gsea_hm_plot <- fit_gsea_hm %>% 
+  dplyr::filter(padj < 0.05)
+fit_gsea_hm_plot <- fit_gsea_hm_plot %>% 
+  dplyr::mutate(pathway_name = 
+                  pathway %>% 
+                  stringr::str_replace("HALLMARK\\_", ""),
+                description_mod =
+                  description %>% 
+                  stringr::str_replace("Genes", "genes") %>% 
+                  stringr::str_replace("genes defining ", "") %>% 
+                  stringr::str_replace("genes involved in ", "") %>% 
+                  stringr::str_replace("genes ", "") %>% 
+                  stringr::str_replace(" \\(.*$", "") %>% 
+                  stringr::str_replace(" \\[.*$", "") %>% 
+                  stringr::str_replace(",.*$", "") %>% 
+                  stringr::str_replace("\\.$", "")) %>% 
+  dplyr::mutate(pw_lb2 = pathway_name %>% 
+                  stringr::str_replace_all("\\_", " ") %>% 
+                  stringr::str_to_sentence() %>% 
+                  stringr::str_replace("Tgf beta", "TGFB1") %>% 
+                  stringr::str_replace("Pi3k akt mtor", "PI3K/AKT/\nmTOR") %>% 
+                  stringr::str_wrap(width = 10)) %>% 
+  dplyr::mutate(pw_label = paste0(
+    pathway_name, ": ", description_mod) %>% 
+      stringr::str_wrap(width = 25)) %>% 
+  dplyr::mutate(pw_lb = pw_lb2 %>% forcats::as_factor())
+
+p_es <- fit_gsea_hm_plot %>% 
+  ggplot(aes(x = "a", y = -log10(padj))) +
+  geom_bar(stat = "identity", width = 0.5) +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed") +
+  facet_grid(.~pw_lb) +
+  theme_bw() +
+  theme(axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        axis.title.x = element_blank(),
+        panel.grid = element_blank()) +
+  ylab("-log10(q-value)")
+
+tb_genes <- fit_gsea_hm_plot %>% 
+  dplyr::group_split(pw_lb) %>% 
+  purrr::map_dfr(function(i_tb) 
+    tibble::tibble(
+      id = i_tb$leadingEdge[[1]][seq(1, 3)],
+      gene_name = i_tb$gene_rep %>% 
+        stringr::str_split("\\;") %>% 
+        {.[[1]][seq(1, 3)]},
+      pw_lb = i_tb$pw_lb
+    )) %>% 
+  dplyr::mutate(pw_lb = pw_lb %>% forcats::as_factor(),
+                gene_name = gene_name %>% 
+                  forcats::as_factor())
+
+p_mtime <- tb_genes %>% 
+  dplyr::left_join(tb_res) %>% 
+  ggplot(aes(x = gene_name, y = log2FoldChange)) +
+  geom_point(size = 1.5) +
+  geom_errorbar(aes(ymin = log2FoldChange - 1.96 * lfcSE, 
+                    ymax = log2FoldChange + 1.96 * lfcSE),
+                width = 0.25) +
+  facet_grid(.~pw_lb, scales = "free_x") +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1),
+        axis.title.x = element_blank(), 
+        strip.background = element_blank(),
+        strip.text.x = element_blank(),
+        panel.grid = element_blank()) +
+  ylab("Adjsuted log2 FC\n(metabo-time)")
+
+p_severity <- tb_genes %>% 
+  dplyr::left_join(tb_res_severity) %>% 
+  ggplot(aes(x = gene_name, y = log2FoldChange)) +
+  geom_point(size = 1.5) +
+  geom_errorbar(aes(ymin = log2FoldChange - 1.96 * lfcSE, 
+                    ymax = log2FoldChange + 1.96 * lfcSE),
+                width = 0.25) +
+  facet_grid(.~pw_lb, scales = "free_x") +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1),
+        axis.title.x = element_blank(), 
+        strip.background = element_blank(),
+        strip.text.x = element_blank(),
+        panel.grid = element_blank()) +
+  ylab("Adjsuted log2 FC\n(mild vs. severe)")
+
+p_fig4 <- cowplot::plot_grid(
+  cowplot::plot_grid(
+    p_DE, 
+    p_prop,
+    labels = c("A", "B"),
+    ncol = 1,
+    align = "v"
+  ),
+  cowplot::plot_grid(
+    p_es,
+    p_mtime, 
+    p_severity,
+    labels = c("C", "", ""),
+    ncol = 1,
+    align = "v"
+  ),
+  nrow = 1,
+  rel_widths = c(0.45, 1)
+)
+ggsave(p_fig4, filename = "results/figures/figure4/fig4.pdf",
+       width = 11, height = 6)
+```
+
+```{r immune analysis}
+genes_hm <- unique(unlist(gset_list_hm))
+
+gset_imm <- msigdbr::msigdbr(species = "human", category = "C7",
+                             subcategory = "IMMUNESIGDB")
+gset_imm_anno <- gset_imm %>% 
+  dplyr::group_by(gs_name) %>% 
+  dplyr::summarise(description = gs_description[1])
+gset_list_imm <- split(gset_imm$ensembl_gene, gset_imm$gs_name)
+genes_imm <- unique(unlist(gset_list_imm))
+
+tb_res_comp <- tb_res %>% 
+  dplyr::mutate(Immune = id %in% genes_imm,
+                HM = id %in% genes_hm, 
+                UC = stringr::str_detect(geneDescription, "^novel transcript")) %>% 
+  dplyr::filter(pvalue < 0.05)
+tb_res_comp %>% 
+  dplyr::group_by(stat > 0) %>% 
+  dplyr::summarise(n = dplyr::n(),
+                   immune_perc = mean(Immune),
+                   hm_perc = mean(HM),
+                   uc_perc = mean(UC, na.rm = TRUE))
+
+fit_gsea_imm_subset <- 
+  fgsea::fora(gset_list_imm, 
+              tb_res %>% 
+                dplyr::filter(), 
+              minSize = 15, maxSize = 400,
+              nperm = 100000)
+fit_gsea_imm <- fgsea::fgseaSimple(gset_list_imm, gene_stats, 
+                                   minSize = 15, maxSize = 400,
+                                   nperm = 100000)
+fit_gsea_imm <- fit_gsea_imm %>% 
+  dplyr::left_join(gset_imm_anno, by = c("pathway" = "gs_name")) %>% 
+  dplyr::mutate(gene_rep = 
+                  leadingEdge %>% 
+                  purrr::map_chr(function(i_genes)
+                    gene_dict[i_genes][seq(1, 3)] %>% 
+                      paste0(collapse = ";") %>% 
+                      paste0(";...")
+                    )) %>% 
+  dplyr::arrange(pval)
+save(fit_gsea_hm, file = "results/3.0_tx/gsea_hm.RData")
+
+tb_res %>% 
+  dplyr::group_by(stat > 0) %>% 
+  # dplyr::filter(stat > 0) %>% 
+  dplyr::arrange(-abs(stat)) %>% 
+  dplyr::mutate(n_top = seq(1, dplyr::n()),
+                n_annotated = cumsum(id %in% geneset_annotated)) %>% 
+  dplyr::ungroup() %>% 
+  ggplot(aes(x = n_top, y = n_annotated)) +
+  geom_point() +
+  facet_grid(.~ stat >0)
+# p_sanCheck_HMOX2_1 <- tibble::tibble(
+#   HMOX2 = mat_tx_norm["ENSG00000103415", ],
+#   Plasmotime = df_matched$Plasmotime
+# ) %>% 
+#   ggplot(aes(x = Plasmotime, y = log2(HMOX2 + half_min))) +
+#   geom_point() +
+#   geom_smooth(method = "lm") +
+#   theme_bw()
+# ggsave(p_sanCheck_HMOX2_1, filename = "results/3.0_tx/HMOX2_sanCheck1.pdf",
+#        width = 3.5, height = 3.5)
+# p_sanCheck_HMOX2_2 <- tibble::tibble(
+#   HMOX2 = mat_tx_norm["ENSG00000103415", ],
+#   `Glyc/SPC ratio` = df_matched$`Glyc/SPC ratio`
+# ) %>% 
+#   ggplot(aes(x = `Glyc/SPC ratio`, y = log2(HMOX2 + half_min))) +
+#   geom_point() +
+#   geom_smooth(method = "lm") +
+#   theme_bw()
+# 
+# 
+# 
+# ggsave(p_sanCheck_HMOX2_2, filename = "results/3.0_tx/HMOX2_sanCheck2.pdf",
+#        width = 3.5, height = 3.5)
+
+## KEGG analysis
+gset_kg <- msigdbr::msigdbr(species = "human", category = "C2", subcategory = "KEGG")
+gset_kg_anno <- gset_kg %>% 
+  dplyr::group_by(gs_name) %>% 
+  dplyr::summarise(description = gs_description[1])
+gset_list_kg <- split(gset_kg$ensembl_gene, gset_kg$gs_name)
+
+fit_gsea_kg <- fgsea::fgseaSimple(gset_list_kg, gene_stats, nperm = 100000)
+fit_gsea_kg_collapse <-
+  fit_gsea_kg %>%
+  dplyr::filter(padj < 0.01) %>%
+  fgsea::collapsePathways(pathways = gset_list_kg,
+                          stats = gene_stats)
+sum(fit_gsea_kg$padj < 0.05 & fit_gsea_kg$pathway %in% fit_gsea_kg_collapse$mainPathways)
+fit_gsea_kg <- fit_gsea_kg %>% 
+  dplyr::left_join(gset_kg_anno, by = c("pathway" = "gs_name")) %>% 
+  dplyr::mutate(gene_rep = 
+                  leadingEdge %>% 
+                  purrr::map_chr(function(i_genes)
+                    gene_dict[i_genes][seq(1, 3)] %>% 
+                      paste0(collapse = ";") %>% 
+                      paste0(";...")
+                    )) %>% 
+  dplyr::arrange(pval) 
+save(fit_gsea_kg, file = "results/3.0_tx/gsea_kg.RData")
+fit_gsea_kg %>% 
+  dplyr::transmute(Pathway = pathway,
+                   q = padj,
+                   `E Score` = ES,
+                   Description = description,
+                   `Rep. genes` = gene_rep) %>% 
+  readr::write_csv("results/3.0_tx/gsea_kg.csv")
+p_sanCheck_OR6A2_1 <- tibble::tibble(
+  OR6A2 = mat_tx_norm["ENSG00000184933", ],
+  Plasmotime = df_matched$Plasmotime
+) %>% 
+  ggplot(aes(x = Plasmotime, y = log2(OR6A2 + half_min))) +
+  geom_point() +
+  geom_smooth(method = "lm") +
+  theme_bw()
+ggsave(p_sanCheck_OR6A2_1, filename = "results/3.0_tx/OR6A2_sanCheck1.pdf",
+       width = 3.5, height = 3.5)
+p_sanCheck_OR6A2_2 <- tibble::tibble(
+  OR6A2 = mat_tx_norm["ENSG00000184933", ],
+  `Glyc/SPC ratio` = df_matched$`Glyc/SPC ratio`
+) %>% 
+  ggplot(aes(x = `Glyc/SPC ratio`, y = log2(OR6A2 + half_min))) +
+  geom_point() +
+  geom_smooth(method = "lm") +
+  theme_bw()
+ggsave(p_sanCheck_OR6A2_2, filename = "results/3.0_tx/OR6A2_sanCheck2.pdf",
+       width = 3.5, height = 3.5)
+```
+
+```{r correlation with severity}
+df_matched$severity_mod <- factor(df_matched$severity, levels = c("mild", "severe"))
+dds <- DESeq2::DESeqDataSetFromMatrix(countData = mat_tx,
+                                      colData = df_matched,
+                                      design = ~ severity_mod + age_mod +
+                                        sex + bmi_mod)
+dds <- DESeq2::DESeq(dds)
+save(dds, file = "results/3.0_tx/DE_severity.RData")
+tb_res <- DESeq2::results(dds, name = "severity_mod") %>% 
+  as.data.frame() %>% 
+  tibble::rownames_to_column("id") %>% 
+  dplyr::filter(!is.na(pvalue))
+tb_res <- tb_res %>% 
+  dplyr::left_join(gene_anno) %>% 
+  dplyr::arrange(pvalue)
+
+p_DE <- tb_res %>% 
+  dplyr::group_by(log2FoldChange > 0) %>% 
+  dplyr::arrange((padj > 0.05) * 1, pvalue) %>% 
+  dplyr::mutate(label = ifelse(seq(1, dplyr::n()) <= 5 & padj < 0.05,
+                               geneName, 
+                               NA_character_)) %>% 
+  dplyr::ungroup() %>% 
+  ggplot(aes(x = log2FoldChange, y = -log10(pvalue))) +
+  geom_point(aes(color = padj < 0.05)) +
+  scale_color_manual(values = c("TRUE" = "red", "FALSE" = "black")) +
+  # geom_hline(yintercept = -log10(0.25), linetype = "dashed") + 
+  ggrepel::geom_text_repel(aes(label = label), min.segment.length = 0) +
+  theme_bw() +
+  theme(legend.position = "none") +
+  xlab("Effect size (log2 fold change)") +
+  ylab("-log10(q-value)") 
+ggsave(p_DE, filename = "results/3.0_tx/volcano.pdf",
+       width = 6, height = 5)
+
+p_qq <- tb_res %>%
+  dplyr::arrange(pvalue) %>%
+  dplyr::mutate(pvalue_theoretical = seq(1, dplyr::n()) / dplyr::n()) %>%
+  ggplot(aes(x = -log10(pvalue_theoretical), y = -log10(pvalue))) +
+  geom_point(aes(color = padj < 0.05)) +
+  scale_color_manual(values = c("TRUE" = "red", "FALSE" = "black")) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed") +
+  theme_bw() +
+  xlab("-log10(theoretical p-value)") +
+  ylab("-log10(observed p-value)")
+ggsave(p_qq, filename = "results/3.0_tx/qq.pdf",
+       width = 6, height = 5)
+
+```
+
+
+```{r correlation of ROS}
+load("results/1.0_opls/predicted.RData")
+df_predicted <- df_predicted %>% 
+  dplyr::filter(cohort == "NY", covid_group != "Control") %>% 
+  dplyr::group_by(patient_id, days_follow_up) %>% 
+  dplyr::summarise(Plasmotime = mean(Plasmotime, na.rm = TRUE)) %>% 
+  dplyr::ungroup()
+
+
+df_meta_combined <- df_meta_combined %>% 
+  dplyr::filter(!is.na(ROS))
+df_meta_combined %>% 
+  dplyr::filter(covid_group != "ny_non_covid") %>% 
+  dplyr::group_by(patient_id, days_follow_up) %>% 
+  dplyr::slice(1) %>% 
+  dplyr::filter(days_follow_up <= 3) %>% 
+  dplyr::select(patient_id, covid_group, days_follow_up, ROS) %>% 
+  View()
+
+df_meta_combined %>% 
+  dplyr::filter(covid_group != "ny_non_covid") %>% 
+  dplyr::filter(days_follow_up <= 30) %>% 
+  dplyr::group_by(patient_id, days_follow_up) %>% 
+  dplyr::slice(1) %>% 
+  ggplot(aes(x = days_follow_up, y = ROS, group = patient_id)) +
+  geom_point() +
+  geom_line()
+
+df_viz <- df_meta_combined %>% 
+  dplyr::group_by(patient_id, days_follow_up) %>% 
+  dplyr::slice(1) %>% 
+  dplyr::group_by(patient_id) %>% 
+  dplyr::filter(dplyr::n() > 1) %>% 
+  dplyr::arrange(patient_id, days_follow_up) %>% 
+  dplyr::select(patient_id, covid_group, days_follow_up, ROS) %>% 
+  dplyr::group_split(patient_id) %>% 
+  purrr::map_dfr(function(i_tb) {
+    tb_days <- tidyr::crossing(day1 = i_tb$days_follow_up,
+                               day2 = i_tb$days_follow_up) %>% 
+      dplyr::filter(day1 < day2)
+    tb_ROS <- i_tb %>% 
+      dplyr::select(days_follow_up, ROS)
+    tb_days %>% 
+      dplyr::left_join(tb_ROS, by = c("day1" = "days_follow_up")) %>% 
+      dplyr::left_join(tb_ROS, by = c("day2" = "days_follow_up"), suffix = c("1", "2")) %>% 
+      dplyr::mutate(patient_id = i_tb$patient_id[1],
+                    covid_group = i_tb$covid_group[1]) %>% 
+      dplyr::filter(abs(day1 - day2) <= 3)
+  })
+p_ROS_comp <- df_viz %>% 
+  ggplot(aes(x = ROS1, y = ROS2)) +
+  geom_point(aes(shape = covid_group,
+                 color = as.factor(day2 - day1))) +
+  geom_smooth(method = "lm") +
+  theme_bw() +
+  geom_abline(intercept = 0, slope = 1, linetype = "dashed")
+ggsave(p_ROS_comp, filename = "results/3.0_tx/ROS/ROS_comp.pdf",
+       width = 5, height = 3.5)
+
+df_meta_ROS <- 
+  df_meta_combined %>% 
+  dplyr::filter(covid_group != "ny_non_covid") %>% 
+  dplyr::group_by(patient_id, days_follow_up) %>% 
+  dplyr::slice(1) %>% 
+  dplyr::filter(days_follow_up <= 3) %>% 
+  dplyr::mutate(days_follow_up = 0)
+
+load("results/1.0_opls/predicted.RData")
+df_predicted <- df_predicted %>% 
+  dplyr::filter(cohort == "NY", covid_group != "Control") %>% 
+  dplyr::group_by(patient_id, days_follow_up) %>% 
+  dplyr::summarise(Plasmotime = mean(Plasmotime, na.rm = TRUE)) %>% 
+  dplyr::ungroup()
+df_meta_ROS <- df_meta_ROS %>% 
+  dplyr::left_join(df_predicted, by = c("patient_id", "days_follow_up"))
+df_meta_ROS %>% 
+  ggplot(aes(x = Plasmotime, y = ROS)) +
+  geom_point() +
+  geom_smooth(method = "lm") +
+  theme_bw()
+summary(lm(ROS ~ Plasmotime, data = df_meta_ROS))$coef
+
+df_metadata_tx <- readr::read_csv("data/COVID-19_DESeq/Meghan_edits/metadata_for_siyuan.csv") %>% 
+  dplyr::select(patient_id, number_days_collected_after_recruitment, sampleID) %>% 
+  dplyr::rename(days_follow_up = number_days_collected_after_recruitment) 
+df_meta_ROS <- df_meta_ROS %>% 
+  dplyr::inner_join(df_metadata_tx)
+
+p_sanCheck_HMOX2_1 <- tibble::tibble(
+  HMOX2 = mat_tx_norm["ENSG00000103415", df_meta_ROS$sampleID],
+  ROS = df_meta_ROS$ROS
+) %>% 
+  ggplot(aes(x = ROS, y = log2(HMOX2 + half_min))) +
+  geom_point() +
+  geom_smooth(method = "lm") +
+  theme_bw()
+ggsave(p_sanCheck_HMOX2_1, filename = "results/3.0_tx/ROS/HMOX2_sanCheck.pdf",
+       width = 3.5, height = 3.5)
+```
+
+```{r individual analytes}
+load("results/1.0_opls/covid_model.RData")
+df_effects <- 
+  tibble(
+    variable = colnames(covid_model@X),
+    value = -covid_model@p_pred[1, ],
+    group = factor(ifelse(value > 0, "COVID associated", "Control associated"), 
+                   levels = c("COVID associated", "Control associated"))
+  ) %>% 
+  dplyr::arrange(-abs(value)) %>% 
+  dplyr::slice(seq(1, 20))
+df_matched <- df_matched %>% 
+  dplyr::mutate(inv_plamotype = -Plasmotime)
+
+dir_output <- paste0("results/3.0_tx/analytes")
+all(df_effects$variable %in% colnames(df_matched))
+future::plan(future::multisession())
+df_gsea <- c("inv_plamotype", df_effects$variable) %>% 
+  future.apply::future_lapply(
+    function(i_variable) {
+      i_variable_name <- i_variable %>% 
+        stringr::str_replace(stringr::fixed("/"), "")
+      i_df_matched <- df_matched %>% 
+        dplyr::mutate(metab = !!sym(i_variable))
+      dds <- DESeq2::DESeqDataSetFromMatrix(
+        countData = mat_tx,
+        colData = i_df_matched,
+        design = ~ metab + age + sex + race_simple + bmi
+      )
+      dds <- DESeq2::DESeq(dds)
+      save(dds, file = paste0(dir_output, "/dd_", i_variable_name, ".RData"))
+      tb_res <- DESeq2::results(dds, name = "metab") %>% 
+        as.data.frame() %>% 
+        tibble::rownames_to_column("id") %>% 
+        dplyr::filter(!is.na(pvalue))
+      tb_res <- tb_res %>% 
+        dplyr::left_join(gene_anno)
+      
+      p_DE <- tb_res %>% 
+        dplyr::group_by(log2FoldChange > 0) %>% 
+        dplyr::arrange((padj > 0.05) * 1, padj) %>% 
+        dplyr::mutate(label = ifelse(seq(1, dplyr::n()) <= 5,
+                                     geneName, 
+                                     NA_character_)) %>% 
+        dplyr::ungroup() %>% 
+        ggplot(aes(x = log2FoldChange, y = -log10(padj))) +
+        geom_point(aes(color = padj < 0.05)) +
+        scale_color_manual(values = c("TRUE" = "red", "FALSE" = "black")) +
+        geom_hline(yintercept = -log10(0.05), linetype = "dashed") + 
+        ggrepel::geom_text_repel(aes(label = label), min.segment.length = 0) +
+        theme_bw() +
+        theme(legend.position = "none") +
+        xlab("Effect size (log2 fold change)") +
+        ylab("-log10(q-value)") +
+        ggtitle(i_variable)
+      ggsave(p_DE, filename = paste0(dir_output, "/volcano_", i_variable_name, ".pdf"),
+             width = 6, height = 5)
+      
+      p_qq <- tb_res %>%
+        dplyr::arrange(pvalue) %>%
+        dplyr::mutate(pvalue_theoretical = seq(1, dplyr::n()) / dplyr::n()) %>%
+        ggplot(aes(x = -log10(pvalue_theoretical), y = -log10(pvalue))) +
+        geom_point(aes(color = padj < 0.05)) +
+        scale_color_manual(values = c("TRUE" = "red", "FALSE" = "black")) +
+        geom_abline(slope = 1, intercept = 0, linetype = "dashed") +
+        theme_bw() +
+        xlab("-log10(theoretical p-value)") +
+        ylab("-log10(observed p-value)") +
+        ggtitle(i_variable)
+      ggsave(p_qq, filename = paste0(dir_output, "/qq_", i_variable_name, ".pdf"),
+             width = 6, height = 5)
+      
+      tb_res %>% 
+        dplyr::arrange(pvalue) %>% 
+        dplyr::select(geneName, log2FoldChange, pvalue, padj, geneDescription) %>% 
+        readr::write_csv(paste0(dir_output, "/deseq_", i_variable_name, ".csv"))
+      
+      gene_stats <- tb_res$stat
+      names(gene_stats) <- tb_res$id
+      gene_stats <- gene_stats[!is.na(gene_stats)]
+      fit_gsea_hm <- fgsea::fgseaSimple(gset_list_hm, gene_stats, nperm = 100000)
+      fit_gsea_hm <- fit_gsea_hm %>% 
+        dplyr::left_join(gset_hm_anno, by = c("pathway" = "gs_name")) %>% 
+        dplyr::mutate(gene_rep = 
+                        leadingEdge %>% 
+                        purrr::map_chr(function(i_genes)
+                          gene_dict[i_genes][seq(1, 3)] %>% 
+                            paste0(collapse = ";") %>% 
+                            paste0(";...")
+                        )) %>% 
+        dplyr::arrange(pval) 
+      
+      fit_gsea_kg <- fgsea::fgseaSimple(gset_list_kg, gene_stats, nperm = 100000)
+      fit_gsea_kg <- fit_gsea_kg %>% 
+        dplyr::left_join(gset_kg_anno, by = c("pathway" = "gs_name")) %>% 
+        dplyr::mutate(gene_rep = 
+                        leadingEdge %>% 
+                        purrr::map_chr(function(i_genes)
+                          gene_dict[i_genes][seq(1, 3)] %>% 
+                            paste0(collapse = ";") %>% 
+                            paste0(";...")
+                        )) %>% 
+        dplyr::arrange(pval) 
+      rbind(
+        fit_gsea_hm %>% 
+          dplyr::mutate(class = "Hallmark"),
+        fit_gsea_kg %>% 
+          dplyr::mutate(class = "KEGG")
+      ) %>% 
+        dplyr::mutate(variable = i_variable)
+    },
+    future.seed = TRUE) %>% 
+  purrr::reduce(rbind)
+readr::write_csv(df_gsea, paste0(dir_output, "/gsea_all.csv"))
+
+c("Hallmark", "KEGG") %>% 
+  purrr::map(function(i_class) {
+    q_cutoff <- c("Hallmark" = 0.05, "KEGG" = 0.01)
+    i_df_plot <- df_gsea %>% 
+      dplyr::filter(class == i_class) %>% 
+      dplyr::mutate(signed_p = sign(ES) * -log10(padj)) %>% 
+      dplyr::group_by(pathway, class) %>% 
+      # dplyr::filter(sum(padj < 0.001, na.rm = TRUE) >= 10 | padj[variable == "inv_plamotype"] < 0.05) %>% 
+      dplyr::filter(padj[variable == "inv_plamotype"] < q_cutoff[i_class]) %>% 
+      dplyr::ungroup()
+    i_mat <- i_df_plot %>% 
+      dplyr::select(pathway, variable, signed_p) %>% 
+      tidyr::pivot_wider(names_from = variable,
+                         values_from = signed_p) %>% 
+      tibble::column_to_rownames("pathway") %>% 
+      as.matrix()
+    # hclust_rows <- hclust(as.dist(1 - cor(t(i_mat), method="sp")))
+    # lvls_pathway <- rownames(i_mat)[hclust_rows$order]
+    lvls_pathway <- i_df_plot %>% 
+      dplyr::filter(variable == "inv_plamotype") %>% 
+      dplyr::arrange(signed_p) %>% 
+      {.$pathway}
+    i_mat_sub <- i_mat[, setdiff(colnames(i_mat), "inv_plamotype")]
+    hclust_cols <- hclust(as.dist(1 - cor(i_mat_sub, method="sp")))
+    lvls_metab <- c(colnames(i_mat_sub)[hclust_cols$order], "inv_plamotype")
+    
+    p_heatmap <- i_df_plot %>% 
+      dplyr::mutate(variable = factor(variable, levels = lvls_metab),
+                    pathway = factor(pathway, levels = lvls_pathway)) %>% 
+      dplyr::arrange(pathway) %>% 
+      dplyr::mutate(pathway_print = 
+                      paste0(pathway, "\n", description) %>% 
+                      forcats::as_factor()) %>% 
+      dplyr::mutate(q_label = dplyr::case_when(
+        padj < 0.001 ~ "***",
+        padj < 0.01 ~ "**",
+        padj < 0.05 ~ "*",
+        TRUE ~ NA_character_
+      )) %>% 
+      ggplot(aes(x = variable, y = pathway_print, fill = signed_p)) +
+      geom_tile() + 
+      geom_text(aes(label = q_label)) +
+      scale_fill_gradient2(low = "blue", high = "red") +
+      theme_bw() +
+      theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1),
+            axis.title = element_blank()) +
+      labs(fill = "-log10(q value) * sign(ES)")
+    ggsave(p_heatmap, filename = paste0(dir_output, "/heatmap_", i_class, ".pdf"),
+           width = 15, height = length(unique(i_df_plot$pathway)) / 2.5, limitsize = FALSE)
+  })
+df_gsea %>% 
+  dplyr::mutate(signed_p = sign(ES) * -log10(padj)) %>% 
+  dplyr::group_by(pathway, class) %>% 
+  dplyr::filter(sum(padj < 0.05, na.rm = TRUE) >= 3) %>% 
+  dplyr::ungroup() %>% 
+  dplyr::filter(class == "Hallmark") %>% 
+  ggplot(aes(x = variable, y = pathway, fill = signed_p)) +
+  geom_tile() +
+  theme_bw()
+load("results/matched/data_predicted.RData")
+mat_nmr <- data_predicted %>% 
+  dplyr::select(1, `2-Aminobutyric acid`:V5TG) %>% 
+  as.data.frame() %>% 
+  tibble::column_to_rownames("nmr_id") %>%
+  as.matrix()
+mat_nmr_transform <- apply(mat_nmr, 2, function(x)
+  if(all(x > 0))
+    return(log(x))
+  else {
+    half_min <- min(setdiff(x, 0)) / 2
+    return(log(x + half_min))
+  })
+mat_nmr_transform <- mat_nmr_transform[df_matched$nmr_id, ]
+
+mat_tx_reduced <- mat_tx[colnames(), ]
+
+future::plan(future::multisession())
+fits <- colnames(mat_nmr_transform) %>% 
+  future.apply::future_lapply(
+    function(i_metab) {
+      df_fit <- as.data.frame(df_matched) %>% 
+        dplyr::mutate(metab = mat_nmr_transform[, i_metab])
+      rownames(df_fit) <- df_matched$sampleID
+      
+      dds <- DESeq2::DESeqDataSetFromMatrix(countData = mat_tx,
+                                            colData = df_fit,
+                                            design = ~ metab)
+      
+      dds <- DESeq2::DESeq(dds)
+      res <- DESeq2::results(dds)
+      res <- as.data.frame(res) %>% 
+        dplyr::mutate(gene = rownames(res),
+                      metab = i_metab) %>% 
+        dplyr::filter(pvalue < 0.05)
+
+      ranks <- sign(res$log2FoldChange) * res$padj
+      tmp <- fgsea::fgsea(gset, ranks)
+      
+      return(res)
+    })
+fit_table <- fits %>% 
+  purrr::reduce(rbind)
+fit_table <- fit_table %>% 
+  dplyr::filter(padj < 0.05) %>% 
+  dplyr::filter(log2FoldChange > 0)
+
+readr::write_csv(fit_table, file = "results/de/de_per_analyte.csv")
+
+gset <- msigdbr::msigdbr(species = "human", category = "H")
+gset <- split(gset$ensembl_gene, gset$gs_name)
+
+p_enrich <- fit_table %>% 
+  dplyr::group_by(metab) %>% 
+  dplyr::summarise(n = dplyr::n()) %>% 
+  dplyr::filter(n > 10) %>% 
+  dplyr::arrange(n) %>% 
+  dplyr::mutate(metab = metab %>% forcats::as_factor()) %>% 
+  ggplot(aes(x = metab, y = log10(n))) +
+  geom_bar(stat = "identity") +
+  coord_flip()
+ggsave(p_enrich, filename = "results/de/enrichment.jpeg",
+       width = 6, height = 8)
+
+all_genes <- rownames(mat_tx)
+for(i_metab in fit_table$metab) {
+  genes <- fit_table %>% 
+    dplyr::filter(metab == i_metab) %>% 
+    {.$gene}
+  g1 <- all_genes %in% genes
+  ps_gsea <- gset %>% 
+    purrr::map_dbl(function(genes_2, iset) {
+      g2 <- all_genes %in% genes_2
+      fit_glm <- glm(g1 ~ g2, family = "binomial")
+      p <- summary(fit_glm)$coef[2, 4] / 2
+      if(summary(fit_glm)$coef[2, 1] < 0)
+        return(1 - p)
+      else
+        return(p)
+    })
+}
+
+tmp %>% dplyr::filter(padj < 0.05) %>% 
+  dplyr::arrange(padj) %>% 
+  as.data.frame() %>% 
+  dplyr::mutate(pathway_write = pathway %>% stringr::str_replace("HALLMARK\\_", "")) %>% 
+  dplyr::select(pathway_write, padj) %>% 
+  readr::write_csv(file = "results/de/gsea.csv")
+```
